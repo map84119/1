@@ -270,6 +270,272 @@ void loadRequestDiscover(){if(requestDiscoverBusy)return;requestDiscoverBusy=tru
             d.setOnDismissListener(x->{requestFocus();invalidate();});
             d.show();
         }
+        void runRequestSearch(String q){q=q==null?"":q.trim();requestNewFocus=false;requestAction=2;requestDiscoverMode=false;if(q.length()<2){requestError="Enter at least 2 characters";invalidate();return;}requestQuery=q;requestBusy=true;requestSearchMode=true;requestError="";requestResults=new JSONArray();col=0;invalidate();final String fq=q;pool.execute(()->{try{JSONObject payload=new JSONObject();payload.put("q",fq);JSONObject res=PresenceService.coreCall(MainActivity.this,"/core-tv/v1/request-search",payload);JSONArray x=res.optJSONArray("results");if(x==null)x=new JSONArray();final JSONArray rx=x;post(()->{requestResults=rx;requestBusy=false;requestError=rx.length()==0?"No results":"";invalidate();});}catch(Exception e){final String m=e.getClass().getSimpleName();post(()->{requestBusy=false;requestError="Request search unavailable: "+m;invalidate();});}});}
+void submitRequest(JSONObject o){if(o==null)return;requestBusy=true;requestError="";detail=false;invalidate();final String mt=o.optString("media_type","");final int mid=o.optInt("tmdb_id",0);pool.execute(()->{try{JSONObject payload=new JSONObject();payload.put("media_type",mt);payload.put("media_id",mid);JSONObject res=PresenceService.coreCall(MainActivity.this,"/core-tv/v1/request-create",payload);if(!res.optBoolean("ok",false))throw new Exception(res.optString("error","request_failed"));post(()->{requestBusy=false;requestSearchMode=false;requestResults=new JSONArray();requestError="Request submitted";invalidate();loadRequests();});}catch(Exception e){final String m=e.getMessage()==null?e.getClass().getSimpleName():e.getMessage();post(()->{requestBusy=false;requestError="Request failed: "+m;invalidate();});}});}
+        void setProfilePin(){if(kidsMode()){android.widget.Toast.makeText(MainActivity.this,"Kids profile security is managed by an adult.",android.widget.Toast.LENGTH_LONG).show();return;}final EditText input=new EditText(MainActivity.this);input.setSingleLine(true);input.setHint("4-8 digit PIN");input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER|android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD);new AlertDialog.Builder(MainActivity.this).setTitle("Set profile PIN").setMessage("This PIN will be required whenever this profile is selected on a Core TV device.").setView(input).setPositiveButton("Set PIN",(d,w)->{String pin=input.getText().toString().trim();if(pin.length()<4||pin.length()>8){android.widget.Toast.makeText(MainActivity.this,"PIN must be 4-8 digits.",android.widget.Toast.LENGTH_LONG).show();return;}pool.execute(()->{try{JSONObject q=new JSONObject();q.put("pin",pin);JSONObject r=PresenceService.coreCall(MainActivity.this,"/core-tv/v1/profile-pin-set",q);if(!r.optBoolean("ok",false))throw new Exception(r.optString("error","pin_failed"));post(()->android.widget.Toast.makeText(MainActivity.this,"Profile PIN saved. It will be required next time this profile is selected.",android.widget.Toast.LENGTH_LONG).show());}catch(Exception e){post(()->android.widget.Toast.makeText(MainActivity.this,"Could not save the profile PIN.",android.widget.Toast.LENGTH_LONG).show());}});}).setNegativeButton("Cancel",null).show();}
+        String profilePrefKey(String base){String id=safeText(p.getString("coretv_profile_id",""));return id.isEmpty()?base:(base+"_"+id);}
+        int textSizeMode(){String k=profilePrefKey("coretv_text_size");return Math.max(0,Math.min(2,p.getInt(k,p.getInt("coretv_text_size",0))));}
+        String textSizeName(){int z=textSizeMode();return z==0?"NORMAL":(z==1?"LARGE":"EXTRA LARGE");}
+        float textScale(){int z=textSizeMode();return z==0?1.0f:(z==1?1.14f:1.28f);}
+        void cycleTextSize(){int z=(textSizeMode()+1)%3;p.edit().putInt(profilePrefKey("coretv_text_size"),z).apply();android.widget.Toast.makeText(MainActivity.this,"Text size: "+textSizeName(),android.widget.Toast.LENGTH_SHORT).show();invalidate();}
+        Set<Integer> hiddenLiveGroupIds(){Set<Integer> out=new HashSet<>();String raw=p.getString(profilePrefKey("coretv_hidden_live_groups"),p.getString("coretv_hidden_live_groups",""));if(raw!=null&&!raw.trim().isEmpty()){for(String s:raw.split(",")){try{out.add(Integer.parseInt(s.trim()));}catch(Exception ignore){}}}return out;}
+        JSONArray visibleLiveGroups(JSONArray src){JSONArray out=new JSONArray();Set<Integer> hidden=hiddenLiveGroupIds();if(src==null)return out;for(int i=0;i<src.length();i++){JSONObject g=src.optJSONObject(i);if(g!=null&&!hidden.contains(g.optInt("id",-1)))out.put(g);}return out;}
+        void promptLiveCategories(){
+            JSONArray src=allLiveGroups.length()>0?allLiveGroups:liveGroups;
+            if(src.length()==0){android.widget.Toast.makeText(MainActivity.this,"Open Live TV once to load categories, then return here.",android.widget.Toast.LENGTH_LONG).show();loadLive();return;}
+            final String[] names=new String[src.length()];final int[] ids=new int[src.length()];final boolean[] checked=new boolean[src.length()];Set<Integer> hidden=hiddenLiveGroupIds();
+            for(int i=0;i<src.length();i++){JSONObject g=src.optJSONObject(i);ids[i]=g==null?-1:g.optInt("id",-1);names[i]=g==null?"Category":g.optString("name","Category");checked[i]=!hidden.contains(ids[i]);}
+            new AlertDialog.Builder(MainActivity.this).setTitle("Live TV categories").setMultiChoiceItems(names,checked,(d,which,on)->checked[which]=on)
+                .setPositiveButton("Save",(d,w)->{
+                    int visible=0;for(boolean x:checked)if(x)visible++;
+                    if(visible==0){checked[0]=true;visible=1;android.widget.Toast.makeText(MainActivity.this,"At least one Live TV category must remain visible.",android.widget.Toast.LENGTH_LONG).show();}
+                    StringBuilder sb=new StringBuilder();for(int i=0;i<checked.length;i++){if(!checked[i]&&ids[i]>0){if(sb.length()>0)sb.append(',');sb.append(ids[i]);}}
+                    p.edit().putString(profilePrefKey("coretv_hidden_live_groups"),sb.toString()).apply();
+                    liveGroups=visibleLiveGroups(src);ensureGroup();int gid=currentGroupId();liveChannels=new JSONArray();liveFiltered=new JSONArray();guidePrograms=new JSONArray();guideTotal=0;col=0;guideChannel=0;guideSlot=0;
+                    if(gid>0)loadLiveGroup(gid,nav==2);invalidate();
+                }).setNegativeButton("Cancel",null).show();
+        }
+        void showProfileDiagnostics(){
+            pool.execute(()->{try{
+                JSONObject d=PresenceService.coreCall(MainActivity.this,"/core-tv/v1/profile-diagnostics",new JSONObject());
+                StringBuilder sb=new StringBuilder();
+                sb.append(d.optBoolean("healthy",false)?"Overall: READY":"Overall: NEEDS ATTENTION");
+                sb.append("\nProfile: ").append(d.optBoolean("kids_mode",false)?"Kids (server enforced)":"Adult");
+                sb.append("\nActive streams: ").append(d.optInt("active_streams",0));
+                JSONArray cs=d.optJSONArray("checks");
+                if(cs!=null)for(int i=0;i<cs.length();i++){JSONObject x=cs.optJSONObject(i);if(x!=null)sb.append("\n").append(x.optBoolean("ok",false)?"OK  ":"!!  ").append(x.optString("label","Check")).append(" - ").append(x.optString("state",""));}
+                final String msg=sb.toString();
+                post(()->new AlertDialog.Builder(MainActivity.this).setTitle("Core TV diagnostics").setMessage(msg).setPositiveButton("OK",null).show());
+            }catch(Exception e){post(()->android.widget.Toast.makeText(MainActivity.this,"Diagnostics unavailable: "+e.getClass().getSimpleName(),android.widget.Toast.LENGTH_LONG).show());}});
+        }        void handleProfileAction(){
+            if(profileAction==0){MainActivity.this.openProfiles();return;}
+            if(profileAction==1){JSONObject f=bootstrap.optJSONObject("features");if(f!=null&&f.optBoolean("core_ai",false))MainActivity.this.openCoreAi();else android.widget.Toast.makeText(MainActivity.this,"Core AI is not included with this household subscription.",android.widget.Toast.LENGTH_LONG).show();return;}
+            if(profileAction==2){if(!kidsMode())setProfilePin();return;}
+            if(profileAction==3){cycleDisplaySize();return;}
+            if(profileAction==4){cycleTextSize();return;}
+            if(profileAction==5){promptLiveCategories();return;}if(profileAction==6){showProfileDiagnostics();return;}
+        }
+        String liveNowTitle(JSONObject o){String n=o==null?"":safeText(o.optString("now_playing",""));int d=n.indexOf("  ");if(d>0)n=n.substring(0,d);return n.trim();}
+        int displaySize(){return Math.max(0,Math.min(2,p.getInt("coretv_display_size",1)));}
+        String displaySizeName(){int z=displaySize();return z==0?"COMPACT":(z==2?"LARGE":"COMFORTABLE");}
+        void cycleDisplaySize(){int z=(displaySize()+1)%3;p.edit().putInt("coretv_display_size",z).apply();android.widget.Toast.makeText(MainActivity.this,"Display size: "+displaySizeName(),android.widget.Toast.LENGTH_SHORT).show();invalidate();}
+        void profile(Canvas c){if(!sessionBusy&&System.currentTimeMillis()-sessionLastFetch>20000L)refreshSessionsQuiet();JSONObject ac=bootstrap.optJSONObject("account"),sv=bootstrap.optJSONObject("services"),features=bootstrap.optJSONObject("features");String dn=ac==null?"Core TV":ac.optString("display_name","Core TV");String hh=ac==null?"":ac.optString("household_name","");String role=ac==null?"":ac.optString("role","");boolean kid=kidsMode();header(c,"Profile",(kid?"KIDS MODE  |  ":"")+(hh.isEmpty()?activeSessionCount+" active stream"+(activeSessionCount==1?"":"s"):"Household  -  "+hh+"  |  "+activeSessionCount+" active"));r(c,235,125,getWidth()-45,330,Color.rgb(8,28,45));int avx=300,avy=205;a.setColor(kid?Color.rgb(255,184,70):blue);c.drawCircle(avx,avy,62,a);b(c,dn.isEmpty()?"?":dn.substring(0,1).toUpperCase(),avx-18,avy+18,45,Color.WHITE);b(c,dn,390,185,33,Color.WHITE);t(c,(kid?"KIDS MODE  -  ":"")+role.toUpperCase(Locale.US)+"  -  "+p.getString("agent_name","This device"),390,225,17,kid?Color.rgb(255,205,100):muted);t(c,kid?"Core enforces child-safe Live TV, library-only search and adult-managed requests.":"History, requests, recommendations, My List and Live favorites stay personal to this profile.",390,260,16,Color.WHITE);boolean ai=features!=null&&features.optBoolean("core_ai",false);float ax=390,gap=10,bw=(getWidth()-45-ax-gap*6)/7f;String[] acts={"SWITCH PROFILE",ai?"OPEN CORE AI":"CORE AI LOCKED",kid?"ADULT MANAGED":"SET PIN","DISPLAY: "+displaySizeName(),"TEXT: "+textSizeName(),"LIVE CATEGORIES","SUPPORT / DIAG"};for(int i=0;i<7;i++){float l=ax+i*(bw+gap);boolean disabled=(i==1&&!ai)||(i==2&&kid);r(c,l,280,l+bw,325,profileAction==i&&!disabled?blue:(disabled?Color.rgb(42,48,56):Color.rgb(18,66,102)));b(c,acts[i],l+12,309,12,disabled?muted:Color.WHITE);}
+        String[] sn={"jellyfin","dispatcharr","seerr"},sl={"MEDIA SERVER","LIVE TV","REQUESTS"};float sx=235,sw=(getWidth()-280)/3f;for(int i=0;i<3;i++){JSONObject s=sv==null?null:sv.optJSONObject(sn[i]);boolean ok=s!=null&&s.optBoolean("reachable",false);float l=sx+i*sw;r(c,l,365,l+sw-14,465,panel);b(c,sl[i],l+24,405,16,Color.WHITE);t(c,(kid&&i==2)?"ADULT MANAGED":(ok?"ONLINE":"UNAVAILABLE"),l+24,438,14,(kid&&i==2)?Color.rgb(255,205,100):(ok?Color.rgb(90,220,130):Color.rgb(255,120,120)));}
+        b(c,"ACTIVE NOW",235,525,20,Color.WHITE);if(activeSessions.length()==0){r(c,235,550,getWidth()-45,650,panel);b(c,"Nothing is playing right now",270,595,21,Color.WHITE);t(c,"Streams from every linked Core TV device will appear here.",270,626,15,muted);}else{int max=Math.min(4,activeSessions.length());for(int i=0;i<max;i++){JSONObject s=activeSessions.optJSONObject(i);if(s==null)continue;float top=550+i*125;r(c,235,top,getWidth()-45,top+105,panel);boolean live=s.optBoolean("live",false);String title=safeText(s.optString("title",""));if(title.isEmpty())title=live?"Live TV":"Active playback";String prof=safeText(s.optString("profile_name","Profile")),dev=safeText(s.optString("device_name","Device"));b(c,shortText(title,55),275,top+39,21,Color.WHITE);t(c,(live?"LIVE":"VOD")+"  -  "+prof+"  -  "+dev,275,top+70,15,live?Color.rgb(255,105,105):muted);int age=s.optInt("age_seconds",0);t(c,age<5?"NOW":age+" sec ago",getWidth()-250,top+55,13,Color.rgb(90,220,130));}}t(c,"Left/Right = profile actions    Center = select",235,getHeight()-40,14,muted);}
+void placeholder(Canvas c,String name){header(c,name,"Core TV Alpha 2");r(c,235,125,getWidth()-40,300,panel);b(c,name+" is connected",270,190,28,Color.WHITE);t(c,"This section is next in the rollout.",270,235,19,muted);}
+JSONArray activeArray(){if(nav==1)return liveArray();if(nav==2)return guidePrograms;if(nav==3)return searchResults;if(nav==4){if(librarySeries)return librarySeasonOpen?librarySeasonEpisodes:librarySeasons;if(librarySectionOpen)return librarySectionItems;return librarySections;}if(nav==5){if(requestDiscoverMode)return requestSectionItems(row);return requestSearchMode?requestResults:requestItems;}return homeArray(row);}
+void drawRow(Canvas c,String title,JSONArray arr,float x,float y,boolean active){b(c,title,x,y,22,Color.WHITE);int n=arr.length(),start=Math.max(0,Math.min(col-3,Math.max(0,n-7))),end=Math.min(n,start+7);for(int idx=start,slot=0;idx<end;idx++,slot++){JSONObject o=arr.optJSONObject(idx);if(o==null)continue;float l=x+slot*205,top=y+28;boolean sel=active&&idx==col,req=o.optBoolean("request_candidate",false);r(c,l-6,top-6,l+190,top+306,sel?blue:panel);String id=o.optString("id","");Bitmap bm=posters.get(id);if(bm!=null)c.drawBitmap(bm,null,new RectF(l,top,l+185,top+270),a);else{r(c,l,top,l+185,top+270,Color.rgb(19+8*slot,34+6*slot,52+5*slot));if(req)loadRequestPoster(o);else{b(c,"UTAHMETA",l+31,top+139,16,Color.WHITE);loadPoster(id);}}String name=displayTitle(o);if(name.length()>23)name=name.substring(0,20)+"...";t(c,name,l+5,top+291,16,Color.WHITE);double pct=o.optDouble("played_percentage",-1);if(pct>0){float pw=(float)(185.0*Math.min(100.0,pct)/100.0);r(c,l,top+262,l+185,top+270,Color.rgb(50,60,70));r(c,l,top+262,l+pw,top+270,blue);}String status=safeText(o.optString("status",""));String series=safeText(o.optString("series_name",""));int yr=o.optInt("year",0);if(req){String lab="available".equals(status)?"AVAILABLE":("requested".equals(status)?"REQUESTED":"REQUEST");int lc="available".equals(status)?Color.rgb(90,220,130):("requested".equals(status)?Color.rgb(255,190,80):blue);t(c,lab+(yr>0?"  "+yr:""),l+5,top+309,13,lc);}else if(!series.isEmpty()){t(c,shortText(series,21),l+5,top+309,13,muted);}else if(yr>0)t(c,String.valueOf(yr),l+5,top+309,14,muted);}if(n==0&&active&&!searchBusy)t(c,"No items",x,y+80,18,muted);}
+String safeText(String s){if(s==null)return "";String z=s.trim();return "null".equalsIgnoreCase(z)?"":z;}
+String cleanSeparators(String s){String z=safeText(s).replace('.',' ').replace('_',' ').replaceAll("\\s+"," ").trim();return z;}
+String displayTitle(JSONObject o){if(o==null)return "Media";String s=safeText(o.optString("name","Media"));if(s.isEmpty())return "Media";try{java.util.regex.Matcher m=java.util.regex.Pattern.compile("(?i)(?:^|[._ -])S(\\d{1,2})E(\\d{1,2})(?:[._ -]+(.*))?$").matcher(s);if(m.find()){String tail=safeText(m.group(3));if(!tail.isEmpty())return cleanSeparators(tail);int season=Integer.parseInt(m.group(1)),ep=Integer.parseInt(m.group(2));return "Season "+season+" Episode "+ep;}}catch(Exception e){}int dots=0;for(int i=0;i<s.length();i++)if(s.charAt(i)=='.')dots++;return dots>=3?cleanSeparators(s):s;}
+String shortText(String s,int n){s=safeText(s);if(n<4)return s;return s.length()<=n?s:s.substring(0,Math.max(1,n-3))+"...";}
+void rebuildChannelNames(){channelNames.clear();for(int i=0;i<liveChannels.length();i++){JSONObject o=liveChannels.optJSONObject(i);if(o!=null){String id=o.optString("id",""),nm=o.optString("name","");if(!id.isEmpty())channelNames.put(id,nm);}}}
+int currentGroupId(){if(liveGroups.length()==0)return 0;liveGroup=Math.max(0,Math.min(liveGroup,liveGroups.length()-1));JSONObject g=liveGroups.optJSONObject(liveGroup);return g==null?0:g.optInt("id",0);}
+String currentGroupName(){if(liveGroups.length()==0)return "";JSONObject g=liveGroups.optJSONObject(Math.max(0,Math.min(liveGroup,liveGroups.length()-1)));return g==null?"":g.optString("name","");}
+void ensureGroup(){if(liveGroups.length()==0){liveGroup=0;return;}int saved=p.getInt("coretv_group_id",-1),pick=-1;for(int i=0;i<liveGroups.length();i++){JSONObject g=liveGroups.optJSONObject(i);if(g!=null&&g.optInt("id",-2)==saved){pick=i;break;}}if(pick<0){for(int i=0;i<liveGroups.length();i++){JSONObject g=liveGroups.optJSONObject(i);if(g!=null&&"US ENTERTAINMENT".equalsIgnoreCase(g.optString("name",""))){pick=i;break;}}}liveGroup=pick>=0?pick:0;p.edit().putInt("coretv_group_id",currentGroupId()).apply();}
+void setGroup(int idx,boolean reloadGuide){if(liveGroups.length()==0)return;liveGroup=Math.max(0,Math.min(idx,liveGroups.length()-1));if(nav==1)liveMode=0;int gid=currentGroupId();p.edit().putInt("coretv_group_id",gid).apply();col=0;guideChannel=0;guideSlot=0;liveQuery="";liveChannels=new JSONArray();liveFiltered=new JSONArray();liveTotal=0;if(reloadGuide){guidePrograms=new JSONArray();guideTotal=0;}loadLiveGroup(gid,reloadGuide);invalidate();}
+JSONArray groupChannels(){if(nav==1&&liveMode==1)return channelsForIds(liveFavorites);if(nav==1&&liveMode==2)return channelsForIds(liveRecent);JSONArray out=new JSONArray();int gid=currentGroupId();for(int i=0;i<liveChannels.length();i++){JSONObject o=liveChannels.optJSONObject(i);if(o!=null&&o.optInt("group_id",-1)==gid)out.put(o);}return out;}
+JSONArray liveArray(){return liveQuery.isEmpty()?groupChannels():liveFiltered;}
+void rebuildLiveFiltered(){liveFiltered=new JSONArray();if(liveQuery.isEmpty())return;String z=liveQuery.toLowerCase(Locale.US);JSONArray base=groupChannels();for(int i=0;i<base.length();i++){JSONObject o=base.optJSONObject(i);if(o!=null&&o.optString("name","").toLowerCase(Locale.US).contains(z))liveFiltered.put(o);}}
+void applyLiveFilter(String q){liveQuery=q==null?"":q.trim();rebuildLiveFiltered();col=0;invalidate();}
+void drawGroupList(Canvas c,float x,float y,float w,boolean active){int n=liveGroups.length();int rh=68,max=Math.max(5,(int)((getHeight()-y-70)/rh));int start=Math.max(0,Math.min(liveGroup-max/2,Math.max(0,n-max)));b(c,"CHANNEL GROUPS",x,y-22,15,muted);for(int k=0;k<max&&start+k<n;k++){int idx=start+k;JSONObject g=liveGroups.optJSONObject(idx);if(g==null)continue;float top=y+k*rh;boolean sel=idx==liveGroup;r(c,x,top,x+w,top+58,sel?(active?blue:Color.rgb(14,61,98)):panel);b(c,shortText(g.optString("name","Group"),28),x+15,top+26,16,Color.WHITE);t(c,g.optInt("count",0)+" channels",x+15,top+48,12,sel?Color.WHITE:muted);}if(n>0)t(c,(liveGroup+1)+" / "+n,x,getHeight()-32,13,muted);}
+void promptLiveFilter(){final EditText input=new EditText(MainActivity.this);input.setSingleLine(true);input.setHint("Channel name");input.setText(liveQuery);new AlertDialog.Builder(MainActivity.this).setTitle("Filter Live TV").setView(input).setPositiveButton("Apply",(d,w)->applyLiveFilter(input.getText().toString())).setNeutralButton("Clear",(d,w)->applyLiveFilter("")).setNegativeButton("Cancel",null).show();}
+int gridStart(JSONArray ar,int cols,int rows){int n=ar==null?0:ar.length();if(n<=cols*rows)return 0;int sr=Math.max(0,col/cols-1);int mr=Math.max(0,(n+cols-1)/cols-rows);sr=Math.min(sr,mr);return sr*cols;}
+void drawMediaGrid(Canvas c,JSONArray ar,float x,float y,boolean active){int cols=displaySize()==0?6:(displaySize()==1?5:4),rows=4,n=ar.length(),start=gridStart(ar,cols,rows);float sx=(getWidth()-x-45)/cols,sy=330;int shown=0;for(int k=0;k<cols*rows&&start+k<n;k++){int idx=start+k,rr=k/cols,cc=k%cols;JSONObject o=ar.optJSONObject(idx);if(o==null)continue;shown++;float l=x+cc*sx,w=sx-20,top=y+rr*sy-(active&&idx==col?9:0);boolean sel=active&&idx==col;a.setStyle(Paint.Style.FILL);a.setColor(Color.rgb(9,14,20));c.drawRoundRect(l-3,top-3,l+w+3,top+306,13,13,a);String id=o.optString("id","");Bitmap bm=posters.get(id);if(bm!=null)drawCover(c,bm,new RectF(l,top,l+w,top+250));else{r(c,l,top,l+w,top+250,Color.rgb(18,27,35));loadPoster(id);}if(sel){a.setStyle(Paint.Style.STROKE);a.setStrokeWidth(4);a.setColor(Color.WHITE);c.drawRoundRect(l-6,top-6,l+w+6,top+312,15,15,a);a.setStyle(Paint.Style.FILL);}b(c,shortText(displayTitle(o),24),l+3,top+277,15,Color.WHITE);String sub=safeText(o.optString("series_name",""));int yr=o.optInt("year",0);if(!sub.isEmpty())t(c,shortText(sub,24),l+3,top+298,12,Color.rgb(144,158,170));else if(yr>0)t(c,String.valueOf(yr),l+3,top+298,12,Color.rgb(144,158,170));}if(n==0)t(c,"No items",x,y+60,18,Color.rgb(144,158,170));else t(c,(start+1)+"-"+(start+shown)+" of "+n,x,getHeight()-27,12,Color.rgb(112,126,138));}
+void loadRequestPoster(JSONObject o){if(o==null)return;String key=o.optString("id","");String pp=o.optString("poster_path","");if(key.isEmpty()||pp.isEmpty()||posters.get(key)!=null||loading.contains(key))return;loading.add(key);pool.execute(()->{try{java.io.File d=new java.io.File(getCacheDir(),"coretv-posters");if(!d.exists())d.mkdirs();java.io.File f=new java.io.File(d,key+".tmdb");Bitmap bm=null;if(f.exists()&&f.length()>100)bm=BitmapFactory.decodeFile(f.getAbsolutePath());if(bm==null){URL u=new URL("https://image.tmdb.org/t/p/w342"+pp);URLConnection x=u.openConnection();x.setConnectTimeout(2500);x.setReadTimeout(5000);try(java.io.InputStream in=x.getInputStream();java.io.ByteArrayOutputStream bo=new java.io.ByteArrayOutputStream()){byte[] buf=new byte[32768];int n;while((n=in.read(buf))>0)bo.write(buf,0,n);byte[] raw=bo.toByteArray();if(raw.length>100){try(java.io.FileOutputStream fo=new java.io.FileOutputStream(f)){fo.write(raw);}bm=BitmapFactory.decodeByteArray(raw,0,raw.length);}}}if(bm!=null)posters.put(key,bm);}catch(Exception e){}finally{loading.remove(key);post(()->invalidate());}});}
+void drawRequestGrid(Canvas c,JSONArray ar,float x,float y,boolean active){int cols=5,rows=3,n=ar.length(),start=gridStart(ar,cols,rows);float sx=(getWidth()-x-55)/5f,sy=315;int shown=0;for(int k=0;k<cols*rows&&start+k<n;k++){int idx=start+k,rr=k/cols,cc=k%cols;JSONObject o=ar.optJSONObject(idx);if(o==null)continue;shown++;float l=x+cc*sx,top=y+rr*sy,w=sx-14;boolean sel=active&&idx==col;r(c,l-5,top-5,l+w,top+285,sel?blue:panel);String id=o.optString("id","");Bitmap bm=posters.get(id);RectF art=new RectF(l+8,top+8,l+w-8,top+205);if(bm!=null)drawCover(c,bm,art);else{r(c,art.left,art.top,art.right,art.bottom,Color.rgb(24,40,58));String pp=o.optString("poster_path","");String jid=o.optString("jellyfin_id","");if(!pp.isEmpty())loadRequestPoster(o);else if(!jid.isEmpty()){Bitmap jb=posters.get(jid);if(jb!=null)drawCover(c,jb,art);else loadPoster(jid);}else b(c,"UTAHMETA",l+22,top+110,16,Color.WHITE);}b(c,shortText(displayTitle(o),22),l+7,top+232,15,Color.WHITE);if(o.optBoolean("request_candidate",false)){String mt=o.optString("media_type","").equals("tv")?"TV SERIES":"MOVIE";int yr=o.optInt("year",0);t(c,mt+(yr>0?"  -  "+yr:""),l+7,top+257,12,sel?Color.WHITE:muted);}else{String st=o.optString("status","requested").toUpperCase(Locale.US);int sc="AVAILABLE".equals(st)?Color.rgb(90,220,130):("DECLINED".equals(st)?Color.rgb(255,120,120):Color.rgb(255,190,80));int yr=o.optInt("year",0);t(c,st+(yr>0?"  -  "+yr:""),l+7,top+257,12,sc);}}if(n==0&&!requestBusy)t(c,requestSearchMode?"No matching titles":"No requests yet",x,y+55,18,muted);else if(n>0)t(c,(start+1)+"-"+(start+shown)+" of "+n,x,getHeight()-32,13,muted);}
+void drawLibraryTiles(Canvas c,JSONArray ar,float x,float y,boolean active){
+int cols=4,rows=3,n=Math.min(ar.length(),cols*rows);float gap=14,sx=(getWidth()-x-45-gap*(cols-1))/cols,sy=(getHeight()-y-45-gap*(rows-1))/rows;
+for(int idx=0;idx<n;idx++){JSONObject o=ar.optJSONObject(idx);if(o==null)continue;int rr=idx/cols,cc=idx%cols;float l=x+cc*(sx+gap),top=y+rr*(sy+gap),w=sx,h=sy;boolean sel=active&&idx==col;
+if(sel){a.setStyle(Paint.Style.STROKE);a.setStrokeWidth(5);a.setColor(Color.WHITE);c.drawRoundRect(l-5,top-5,l+w+5,top+h+5,18,18,a);a.setStyle(Paint.Style.FILL);}
+r(c,l,top,l+w,top+h,Color.rgb(10,20,30));JSONArray ids=o.optJSONArray("cover_ids");
+if(ids!=null&&ids.length()>0){
+float artH=h-58,mainW=w*.56f;String i0=ids.optString(0,""),i1=ids.optString(1,""),i2=ids.optString(2,"");
+Bitmap b0=posters.get(i0),b1=posters.get(i1),b2=posters.get(i2);
+if(b0!=null)drawCover(c,b0,new RectF(l,top,l+mainW,top+artH));else if(!i0.isEmpty())loadPoster(i0);
+if(b1!=null)drawCover(c,b1,new RectF(l+mainW,top,l+w,top+artH/2));else if(!i1.isEmpty())loadPoster(i1);
+if(b2!=null)drawCover(c,b2,new RectF(l+mainW,top+artH/2,l+w,top+artH));else if(!i2.isEmpty())loadPoster(i2);
+}else{r(c,l,top,l+w,top+h-58,Color.rgb(18,34,50));b(c,"UTAHMETA",l+22,top+70,18,Color.WHITE);}
+a.setShader(new LinearGradient(0,top+h-105,0,top+h,new int[]{Color.argb(45,3,9,15),Color.argb(250,3,9,15)},null,Shader.TileMode.CLAMP));c.drawRect(l,top+h-110,l+w,top+h,a);a.setShader(null);
+                String nm=libraryDisplayName(o),typ=o.optString("section_type","");String lab="movies".equals(typ)?"MOVIES":("tvshows".equals(typ)?"TV SERIES":("recordings".equals(typ)?"RECORDINGS":("music".equals(typ)?"MUSIC":("audiobooks".equals(typ)?"AUDIOBOOKS":"MEDIA"))));
+                t(c,lab,l+16,top+h-73,11,Color.rgb(94,185,255));b(c,shortText(nm,27),l+16,top+h-42,18,Color.WHITE);t(c,o.optInt("count",0)+" titles",l+16,top+h-18,12,Color.rgb(164,179,191));
+            }
+            if(ar.length()==0)t(c,"Loading your libraries...",x,y+60,18,muted);
+        }
+
+        void drawChannelGrid(Canvas c,JSONArray ar,float x,float y,boolean active){int cols=5,rows=4,n=ar.length(),start=gridStart(ar,cols,rows);float sx=(getWidth()-x-55)/5f,sy=225;int shown=0;for(int k=0;k<cols*rows&&start+k<n;k++){int idx=start+k,rr=k/cols,cc=k%cols;JSONObject o=ar.optJSONObject(idx);if(o==null)continue;shown++;float l=x+cc*sx,top=y+rr*sy,w=sx-14;boolean sel=active&&idx==col;r(c,l-5,top-5,l+w,top+200,sel?blue:panel);String id=o.optString("id","");Bitmap bm=posters.get(id);RectF art=new RectF(l+8,top+8,l+w-8,top+128);if(bm!=null){if(!safeText(o.optString("logo_url","")).isEmpty())drawContain(c,bm,art);else drawCover(c,bm,art);}else{r(c,art.left,art.top,art.right,art.bottom,Color.rgb(20+cc*5,34+rr*5,52));b(c,"LIVE",l+25,top+72,18,Color.WHITE);loadPoster(id);}String num=String.valueOf(o.optDouble("channel_number",0));if(num.endsWith(".0"))num=num.substring(0,num.length()-2);String ch=(isLiveFavorite(id)?" ":"")+num+"  "+shortText(o.optString("name","Channel"),18);b(c,ch,l+7,top+151,13,Color.WHITE);String now=liveNowTitle(o);t(c,now.isEmpty()?"Guide data unavailable":shortText(now,27),l+7,top+180,13,now.isEmpty()?muted:Color.rgb(190,213,232));}if(n>0)t(c,(start+1)+"-"+(start+shown)+" of "+n,x,getHeight()-32,14,muted);}
+
+        JSONArray guideChannelIds(){JSONArray out=new JSONArray();JSONArray cs=groupChannels();for(int i=0;i<cs.length();i++){JSONObject o=cs.optJSONObject(i);if(o!=null)out.put(o.optString("id",""));}return out;}
+        JSONArray guideForChannel(String cid){JSONArray out=new JSONArray();for(int i=0;i<guidePrograms.length();i++){JSONObject o=guidePrograms.optJSONObject(i);if(o!=null&&cid.equals(o.optString("channel_id","")))out.put(o);}if(out.length()==0&&guidePrograms.length()<guideTotal&&!guideMoreBusy)loadGuideMore();return out;}
+        String channelName(String cid){String nm=channelNames.get(cid);return nm==null||nm.isEmpty()?"Channel":nm;}
+        String channelNumber(String cid){JSONArray cs=groupChannels();for(int i=0;i<cs.length();i++){JSONObject o=cs.optJSONObject(i);if(o!=null&&cid.equals(o.optString("id",""))){String n=String.valueOf(o.optDouble("channel_number",0));return n.endsWith(".0")?n.substring(0,n.length()-2):n;}}return "";}
+        long epgTime(String s){if(s==null||s.isEmpty())return 0L;try{return java.time.OffsetDateTime.parse(s).toInstant().toEpochMilli();}catch(Exception e){try{return java.time.Instant.parse(s).toEpochMilli();}catch(Exception x){try{return java.time.ZonedDateTime.parse(s).toInstant().toEpochMilli();}catch(Exception y){return 0L;}}}}
+        int guideParsedCount(JSONArray ar){int n=0;for(int i=0;i<ar.length();i++){JSONObject o=ar.optJSONObject(i);if(o!=null&&epgTime(o.optString("start_date",""))>0)n++;}return n;}
+        int guideStartChannel(){JSONArray ids=guideChannelIds();int n=ids.length();guideChannel=Math.max(0,Math.min(guideChannel,Math.max(0,n-1)));int visible=8,st=Math.max(0,guideChannel-visible/2);return Math.min(st,Math.max(0,n-visible));}
+        JSONObject guideCurrent(){JSONArray ids=guideChannelIds();if(ids.length()==0)return null;guideChannel=Math.max(0,Math.min(guideChannel,ids.length()-1));String cid=ids.optString(guideChannel,"");JSONArray gp=guideForChannel(cid);if(gp.length()==0)return null;guideSlot=Math.max(0,Math.min(guideSlot,gp.length()-1));return gp.optJSONObject(guideSlot);}
+        int guideSlotForTime(String cid,long when){JSONArray gp=guideForChannel(cid);if(gp.length()==0)return 0;int best=0;long bd=Long.MAX_VALUE;for(int i=0;i<gp.length();i++){JSONObject o=gp.optJSONObject(i);long s=epgTime(o.optString("start_date","")),e=epgTime(o.optString("end_date",""));if(s>0&&e>0&&when>=s&&when<e)return i;long d=Math.abs(when-s);if(d<bd){bd=d;best=i;}}return best;}
+        void drawGuideGrid(Canvas c){
+            JSONArray ids=guideChannelIds();if(ids.length()==0){if(!guideBusy)t(c,"No channels in this group",590,220,18,muted);return;}
+            int start=guideStartChannel(),rows=Math.min(8,ids.length()-start);float lx=590,labelW=260,gwStart=lx+labelW+10,right=getWidth()-45,gridW=right-gwStart,rowH=116,top=205;
+            long now=System.currentTimeMillis(),base=(now/(30*60000L))*(30*60000L),span=4*60*60000L;java.text.SimpleDateFormat fmt=new java.text.SimpleDateFormat("h:mm a",Locale.US);
+            for(int h=0;h<=4;h++){float xx=gwStart+gridW*(h/4f);t(c,fmt.format(new java.util.Date(base+h*60*60000L)),xx+5,190,13,muted);a.setColor(Color.rgb(32,47,62));c.drawLine(xx,195,xx,top+rows*rowH,a);}
+            for(int rr=0;rr<rows;rr++){int ci=start+rr;String cid=ids.optString(ci,"");float yy=top+rr*rowH;boolean rowSel=!groupFocus&&ci==guideChannel;r(c,lx,yy,lx+labelW,yy+100,rowSel&&guideSlot<0?blue:panel);
+                Bitmap logo=posters.get(cid);RectF ld=new RectF(lx+10,yy+12,lx+76,yy+72);if(logo!=null)drawContain(c,logo,ld);else loadPoster(cid);
+                b(c,channelNumber(cid),lx+86,yy+36,14,Color.WHITE);t(c,shortText(channelName(cid),20),lx+86,yy+61,13,Color.WHITE);
+                JSONArray gp=guideForChannel(cid);if(gp.length()==0)t(c,"No guide data",lx+86,yy+83,11,muted);
+                for(int pi=0;pi<gp.length();pi++){JSONObject o=gp.optJSONObject(pi);long st=epgTime(o.optString("start_date","")),en=epgTime(o.optString("end_date",""));if(st==0)continue;if(en<=st)en=st+30*60000L;if(en<base||st>base+span)continue;float x1=gwStart+gridW*((Math.max(st,base)-base)/(float)span),x2=gwStart+gridW*((Math.min(en,base+span)-base)/(float)span);x2=Math.min(right,Math.max(x1+55,x2));boolean sel=!groupFocus&&ci==guideChannel&&pi==guideSlot;r(c,x1+3,yy,x2-3,yy+100,sel?blue:Color.rgb(17,38,60));b(c,shortText(o.optString("name","Program"),Math.max(7,(int)((x2-x1)/9))),x1+10,yy+40,14,Color.WHITE);t(c,fmt.format(new java.util.Date(st)),x1+10,yy+68,12,sel?Color.WHITE:muted);}
+            }
+            if(now>=base&&now<=base+span){float nx=gwStart+gridW*((now-base)/(float)span);a.setColor(Color.rgb(255,80,80));a.setStrokeWidth(3);c.drawLine(nx,195,nx,top+rows*rowH,a);a.setStrokeWidth(1);}
+            t(c,groupFocus?"UP/DOWN choose group  -  RIGHT opens guide":"UP/DOWN channels  -  LEFT/RIGHT programs  -  LEFT to groups",590,getHeight()-30,14,muted);
+        }
+
+        int touchGridIndex(JSONArray ar,int cols,int rows,float x0,float y0,float sx,float sy,float x,float y){int start=gridStart(ar,cols,rows);int cc=(int)((x-x0)/sx),rr=(int)((y-y0)/sy);if(cc<0||cc>=cols||rr<0||rr>=rows)return -1;int idx=start+rr*cols+cc;return idx<ar.length()?idx:-1;}
+        void loadPoster(String id){
+            if(id==null||id.isEmpty()||posters.get(id)!=null||loading.contains(id))return;
+            loading.add(id);
+            imagePool.execute(()->{
+                try{
+                    java.io.File d=new java.io.File(getCacheDir(),"coretv-posters");if(!d.exists())d.mkdirs();
+                    java.io.File f=new java.io.File(d,id+".img");
+                    Bitmap bm=null;
+                    for(int attempt=0;attempt<2&&bm==null;attempt++){
+                        if(attempt>0&&f.exists())f.delete();
+                        if(!f.exists()||f.length()<=100){
+                            String urlText=liveLogoUrl(id);
+                            if(urlText.isEmpty()){
+                                String sg=p.getString("stream_gateway","");
+                                if(!sg.isEmpty()&&!p.getString("agent_id","").isEmpty()){
+                                    JSONObject q=new JSONObject();q.put("item_id",id);
+                                    JSONObject ir=PresenceService.streamCall(MainActivity.this,"/core-tv/v1/image",q);
+                                    urlText=PresenceService.resolveStreamUrl(MainActivity.this,ir.optString("url",""));
+                                }else urlText="http://192.168.50.200:8096/Items/"+id+"/Images/Primary?maxWidth=420&quality=80";
+                            }
+                            if(!urlText.isEmpty())downloadArtwork(urlText,f,8000);
+                        }
+                        bm=decodeArtwork(f,420,630);
+                    }
+                    if(bm!=null){posters.put(id,bm);android.util.Log.i("CoreTVArt","poster ready id="+id);}
+                    else android.util.Log.w("CoreTVArt","poster unavailable id="+id);
+                }catch(Exception e){android.util.Log.w("CoreTVArt","poster failed id="+id+" "+e.getClass().getSimpleName());}
+                finally{loading.remove(id);post(()->artworkChanged());}
+            });
+        }
+        Bitmap decodeArtwork(java.io.File f,int reqW,int reqH){
+            if(f==null||!f.exists()||f.length()<=100)return null;
+            try{
+                BitmapFactory.Options bounds=new BitmapFactory.Options();
+                bounds.inJustDecodeBounds=true;
+                BitmapFactory.decodeFile(f.getAbsolutePath(),bounds);
+                if(bounds.outWidth<=0||bounds.outHeight<=0)return null;
+                int sample=1;
+                while((bounds.outWidth/(sample*2))>=reqW&&(bounds.outHeight/(sample*2))>=reqH)sample*=2;
+                BitmapFactory.Options opts=new BitmapFactory.Options();
+                opts.inSampleSize=Math.max(1,sample);
+                opts.inPreferredConfig=Bitmap.Config.RGB_565;
+                opts.inDither=true;
+                return BitmapFactory.decodeFile(f.getAbsolutePath(),opts);
+            }catch(Throwable t){return null;}
+        }
+        void downloadArtwork(String urlText,java.io.File f,int readTimeout)throws Exception{
+            URL u=new URL(urlText);URLConnection x=u.openConnection();
+            x.setConnectTimeout(3500);x.setReadTimeout(readTimeout);
+            x.setRequestProperty("User-Agent","UtahMeta-CoreTV/0.12");
+            java.io.File tmp=new java.io.File(f.getParentFile(),f.getName()+".tmp");
+            try(java.io.InputStream in=x.getInputStream();java.io.FileOutputStream fo=new java.io.FileOutputStream(tmp)){
+                byte[] buf=new byte[16384];int n;long total=0;
+                while((n=in.read(buf))>0){fo.write(buf,0,n);total+=n;if(total>12L*1024L*1024L)throw new java.io.IOException("artwork_too_large");}
+            }
+            if(tmp.length()>100){
+                if(f.exists())f.delete();
+                if(!tmp.renameTo(f)){try(java.io.FileInputStream in=new java.io.FileInputStream(tmp);java.io.FileOutputStream fo=new java.io.FileOutputStream(f)){byte[] buf=new byte[16384];int n;while((n=in.read(buf))>0)fo.write(buf,0,n);}tmp.delete();}
+            }else tmp.delete();
+        }
+        void loadBackdrop(String id){
+            if(id==null||id.isEmpty()||backdrops.get(id)!=null||loading.contains("b:"+id))return;
+            loading.add("b:"+id);
+            imagePool.execute(()->{
+                try{
+                    java.io.File d=new java.io.File(getCacheDir(),"coretv-backdrops");if(!d.exists())d.mkdirs();
+                    java.io.File f=new java.io.File(d,id+".img");
+                    Bitmap bm=null;
+                    for(int attempt=0;attempt<2&&bm==null;attempt++){
+                        if(attempt>0&&f.exists())f.delete();
+                        if(!f.exists()||f.length()<=100){
+                            String urlText="";
+                            String sg=p.getString("stream_gateway","");
+                            if(!sg.isEmpty()&&!p.getString("agent_id","").isEmpty()){
+                                JSONObject q=new JSONObject();q.put("item_id",id);q.put("image_type","backdrop");
+                                JSONObject ir=PresenceService.streamCall(MainActivity.this,"/core-tv/v1/image",q);
+                                urlText=PresenceService.resolveStreamUrl(MainActivity.this,ir.optString("url",""));
+                            }else urlText="http://192.168.50.200:8096/Items/"+id+"/Images/Backdrop/0?maxWidth=1280&quality=80";
+                            if(!urlText.isEmpty())downloadArtwork(urlText,f,9000);
+                        }
+                        bm=decodeArtwork(f,1280,720);
+                    }
+                    if(bm!=null){backdrops.put(id,bm);android.util.Log.i("CoreTVArt","backdrop ready id="+id);}
+                    else android.util.Log.w("CoreTVArt","backdrop unavailable id="+id);
+                }catch(Exception e){android.util.Log.w("CoreTVArt","backdrop failed id="+id+" "+e.getClass().getSimpleName());}
+                finally{loading.remove("b:"+id);post(()->artworkChanged());}
+            });
+        }
+        JSONObject current(){if(nav==2)return guideCurrent();JSONArray arr=activeArray();if(arr==null||arr.length()==0)return null;col=Math.max(0,Math.min(col,arr.length()-1));return arr.optJSONObject(col);}
+        void mergeJson(JSONObject dst,JSONObject src){if(dst==null||src==null)return;java.util.Iterator<String> it=src.keys();while(it.hasNext()){String k=it.next();try{dst.put(k,src.opt(k));}catch(Exception e){}}}
+        void loadItemDetails(JSONObject o){if(o==null||nav==1||nav==2||o.optBoolean("request_candidate",false)||"Request".equals(o.optString("type","")))return;String id=o.optString("id","");if(id.isEmpty())return;detailBusy=true;pool.execute(()->{try{JSONObject q=new JSONObject();q.put("item_id",id);JSONObject r=PresenceService.coreCall(MainActivity.this,"/core-tv/v1/item-details",q);JSONObject item=r.optJSONObject("item");post(()->{if(selected!=null&&id.equalsIgnoreCase(selected.optString("id",""))&&item!=null){mergeJson(selected,item);String art=safeText(selected.optString("series_id",""));if(art.isEmpty())art=id;loadBackdrop(art);}detailBusy=false;invalidate();});}catch(Exception e){post(()->{detailBusy=false;invalidate();});}});}
+        String joinJsonStrings(JSONArray ar,int max){if(ar==null)return "";StringBuilder s=new StringBuilder();for(int i=0;i<Math.min(max,ar.length());i++){String z=safeText(ar.optString(i,""));if(z.isEmpty())continue;if(s.length()>0)s.append("  /  ");s.append(z);}return s.toString();}
+        String castLine(JSONArray ar,int max){if(ar==null)return "";StringBuilder s=new StringBuilder();for(int i=0;i<Math.min(max,ar.length());i++){JSONObject o=ar.optJSONObject(i);if(o==null)continue;String n=safeText(o.optString("name",""));if(n.isEmpty())continue;if(s.length()>0)s.append("  /  ");s.append(n);}return s.toString();}
+        void drawLiveDetail(Canvas c){String cid=selectedLiveChannelId();JSONObject ch=channelById(cid);String nm=ch==null?channelName(cid):ch.optString("name","Channel"),num=ch==null?channelNumber(cid):String.valueOf(ch.optDouble("channel_number",0));if(num.endsWith(".0"))num=num.substring(0,num.length()-2);header(c,num+"  "+nm,"Live TV  -  "+currentGroupName());float x=250,y=125;r(c,x,y,getWidth()-45,600,Color.rgb(7,27,44));Bitmap bm=posters.get(cid);if(bm!=null)c.drawBitmap(bm,null,new RectF(x+30,y+35,x+330,y+250),a);else{r(c,x+30,y+35,x+330,y+250,panel);b(c,"LIVE",x+120,y+150,28,Color.WHITE);loadPoster(cid);}JSONObject now=nowProgram(cid),next=nextProgram(cid);b(c,"NOW",620,180,15,blue);b(c,now==null?"Live programming":shortText(now.optString("name","Live programming"),55),620,220,29,Color.WHITE);if(now!=null){long st=epgTime(now.optString("start_date","")),en=epgTime(now.optString("end_date",""));if(st>0&&en>st){long cur=System.currentTimeMillis();int pct=(int)Math.max(0,Math.min(100,(cur-st)*100/(en-st)));t(c,pct+"% through program",620,251,15,muted);r(c,620,265,1120,274,Color.rgb(42,58,72));r(c,620,265,620+5*pct,274,blue);}}b(c,"NEXT",620,315,15,muted);t(c,next==null?"Guide data will update automatically":shortText(next.optString("name","Program"),55),620,347,20,Color.WHITE);float by=405,bw=250,gap=18;String[] labels={"WATCH",isLiveFavorite(cid)?"REMOVE FAVORITE":"ADD FAVORITE","LAST CHANNEL"};for(int i=0;i<3;i++){boolean disabled=i==2&&(liveLastChannel==null||liveLastChannel.isEmpty()||liveLastChannel.equals(cid));r(c,620+i*(bw+gap),by,620+i*(bw+gap)+bw,by+70,detailAction==i&&!disabled?blue:(disabled?Color.rgb(42,48,56):Color.rgb(18,66,102)));b(c,labels[i],650+i*(bw+gap),by+43,16,disabled?muted:Color.WHITE);}t(c,"UP/DOWN while watching = surf channels  |  LEFT = last channel  |  OK = Now/Next",620,540,15,muted);}
+        void drawDetail(Canvas c){JSONObject o=selected;if(o==null){detail=false;return;}if(isLiveDetail()){drawLiveDetail(c);return;}boolean req=o.optBoolean("request_candidate",false);String id=o.optString("id",""),art=safeText(o.optString("series_id",""));if(art.isEmpty())art=id;float top=90,heroB=675;r(c,0,top,getWidth(),heroB,Color.rgb(3,9,14));Bitmap back=backdrops.get(art);if(back!=null){drawCover(c,back,new RectF(0,top,getWidth(),heroB));a.setShader(new LinearGradient(0,0,getWidth()*.84f,0,new int[]{Color.argb(252,3,8,13),Color.argb(215,3,8,13),Color.argb(86,3,8,13),Color.argb(8,3,8,13)},new float[]{0f,.36f,.74f,1f},Shader.TileMode.CLAMP));c.drawRect(0,top,getWidth(),heroB,a);a.setShader(new LinearGradient(0,top,0,heroB,new int[]{Color.argb(0,3,8,13),Color.argb(30,3,8,13),Color.argb(245,3,8,13)},new float[]{0f,.58f,1f},Shader.TileMode.CLAMP));c.drawRect(0,top,getWidth(),heroB,a);a.setShader(null);}else if(!req)loadBackdrop(art);Bitmap bm=posters.get(id);if(bm!=null)drawCover(c,bm,new RectF(72,176,305,530));else if(!req)loadPoster(id);float tx=350;b(c,shortText(displayTitle(o),52),tx,220,44,Color.WHITE);String series=safeText(o.optString("series_name",""));if(!series.isEmpty())t(c,series,tx,255,16,Color.rgb(211,220,227));StringBuilder meta=new StringBuilder();int season=o.optInt("season_number",-1),ep=o.optInt("episode_number",-1),yr=o.optInt("year",0),runtime=o.optInt("runtime_minutes",0);if(season>=0&&ep>=0)meta.append("S").append(season).append(" E").append(ep);if(yr>0){if(meta.length()>0)meta.append("   ");meta.append(yr);}if(runtime>0){if(meta.length()>0)meta.append("   ");meta.append(runtime).append(" min");}String rating=safeText(o.optString("official_rating",""));if(!rating.isEmpty()){if(meta.length()>0)meta.append("   ");meta.append(rating);}double cr=o.optDouble("community_rating",o.optDouble("vote_average",0));if(cr>0){if(meta.length()>0)meta.append("   ");meta.append(String.format(Locale.US,"%.1f/10",cr));}t(c,meta.toString(),tx,286,15,Color.rgb(183,195,204));String genres=joinJsonStrings(o.optJSONArray("genres"),4);if(!genres.isEmpty())t(c,genres,tx,314,13,Color.rgb(205,214,221));String overview=safeText(o.optString("overview",""));if(!overview.isEmpty())drawWrapped(c,overview,tx,342,Math.min(980,getWidth()-tx-90),15,Color.rgb(205,213,220),2);String status=safeText(o.optString("status",""));float by=405;a.setColor(detailAction==0?Color.WHITE:Color.argb(205,28,38,47));c.drawRoundRect(tx,by,tx+330,by+62,16,16,a);String action=req?("available".equals(status)?"FIND IN LIBRARY":("requested".equals(status)?"REQUESTED":("tv".equals(o.optString("media_type",""))?"REQUEST SERIES":"REQUEST MOVIE"))):("Series".equals(o.optString("type",""))?"BROWSE SEASONS":(o.optLong("position_ticks",0)>0?"RESUME":"PLAY"));b(c,action,tx+35,by+39,16,detailAction==0?Color.rgb(4,10,15):Color.WHITE);if(!req&&!"Request".equals(o.optString("type",""))){boolean fav=isInMyList(id);a.setColor(detailAction==1?Color.rgb(67,156,226):Color.argb(205,28,38,47));c.drawRoundRect(tx+350,by,tx+690,by+62,16,16,a);b(c,fav?"REMOVE FROM MY LIST":"ADD TO MY LIST",tx+380,by+39,14,Color.WHITE);}if("Series".equals(o.optString("type","")))drawDetailSeasons(c,o);String cast=castLine(o.optJSONArray("people"),7);if(!cast.isEmpty()){b(c,"CAST",72,735,13,Color.rgb(129,145,158));drawWrapped(c,cast,72,767,getWidth()-144,15,Color.rgb(205,215,223),2);}t(c,"LEFT / RIGHT  ACTIONS     DOWN  SEASONS     BACK  RETURN",72,getHeight()-34,11,Color.rgb(118,132,144));}
+        void drawWrapped(Canvas c,String s,float x,float y,float max,float size,int color,int lines){if(s==null)return;a.setTextSize(size);String clean=s.replace((char)10,' ').replace((char)13,' ');String[] words=clean.trim().split("\\s+");StringBuilder line=new StringBuilder();int n=0;for(String w:words){String test=line.length()==0?w:line+" "+w;if(a.measureText(test)>max&&line.length()>0){t(c,line.toString(),x,y+n*(size+7),size,color);n++;if(n>=lines)return;line=new StringBuilder(w);}else{if(line.length()>0)line.append(" ");line.append(w);}}if(line.length()>0&&n<lines)t(c,line.toString(),x,y+n*(size+7),size,color);}
+        void promptSearch(){
+            final EditText input=new EditText(MainActivity.this);
+            input.setSingleLine(true);
+            input.setHint("Movie, show or episode");
+            input.setText(searchQuery);
+            input.setSelectAllOnFocus(true);
+            input.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
+            input.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+            final AlertDialog d=new AlertDialog.Builder(MainActivity.this)
+                .setTitle("Search Core TV")
+                .setView(input)
+                .setPositiveButton("Search",null)
+                .setNegativeButton("Cancel",null)
+                .create();
+            d.setOnShowListener(x->{
+                android.view.View.OnClickListener submit=vx->{
+                    String q=input.getText()==null?"":input.getText().toString().trim();
+                    if(q.length()<2){
+                        input.setError("Enter at least 2 characters");
+                        input.requestFocus();
+                        return;
+                    }
+                    try{
+                        android.view.inputmethod.InputMethodManager im=(android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE);
+                        if(im!=null)im.hideSoftInputFromWindow(input.getWindowToken(),0);
+                    }catch(Exception ignored){}
+                    d.dismiss();
+                    requestFocus();
+                    runSearch(q);
+                };
+                android.widget.Button b=d.getButton(AlertDialog.BUTTON_POSITIVE);
+                if(b!=null)b.setOnClickListener(submit);
+                input.setOnEditorActionListener((tv,action,event)->{
+                    boolean go=action==android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+                        || action==android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+                        || (event!=null&&event.getAction()==KeyEvent.ACTION_DOWN
+                            && (event.getKeyCode()==KeyEvent.KEYCODE_ENTER||event.getKeyCode()==KeyEvent.KEYCODE_DPAD_CENTER));
+                    if(go){android.widget.Button pb=d.getButton(AlertDialog.BUTTON_POSITIVE);if(pb!=null)pb.performClick();return true;}
+                    return false;
+                });
+                input.requestFocus();
+                if(d.getWindow()!=null){
+                    d.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+                    int ww=(int)(getResources().getDisplayMetrics().widthPixels*.72f);
+                    d.getWindow().setLayout(ww,WindowManager.LayoutParams.WRAP_CONTENT);
+                }
+            });
+            d.setOnDismissListener(x->{requestFocus();invalidate();});
+            d.show();
+        }
         void runSearch(String q){q=q==null?"":q.trim();if(q.length()<2){searchError="Enter at least 2 characters";invalidate();return;}searchQuery=q;searchBusy=true;searchError="";searchResults=new JSONArray();col=0;invalidate();final String fq=q;pool.execute(()->{try{JSONObject payload=new JSONObject();payload.put("q",fq);JSONObject res=PresenceService.coreCall(MainActivity.this,"/core-tv/v1/search",payload);JSONArray x=res.optJSONArray("results");if(x==null)x=new JSONArray();final JSONArray rx=x;final int owned=res.optInt("owned_count",0),discover=res.optInt("discover_count",0);post(()->{searchResults=rx;searchOwned=owned;searchDiscover=discover;searchBusy=false;searchError=rx.length()==0?"No results":"";warmPosters(searchResults,12);for(int i=0;i<Math.min(12,searchResults.length());i++){JSONObject so=searchResults.optJSONObject(i);if(so!=null&&so.optBoolean("request_candidate",false))loadRequestPoster(so);}invalidate();});}catch(Exception e){final String m=e.getClass().getSimpleName();post(()->{searchBusy=false;searchError="Search unavailable: "+m;invalidate();});}});}
         void loadLive(){
             if(liveBusy)return;liveBusy=true;liveError="";invalidate();
