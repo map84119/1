@@ -1,0 +1,52 @@
+plugins {
+    id 'com.android.application'
+}
+
+def coretvStoreFile = project.findProperty('CORETV_STORE_FILE')
+def coretvStorePassword = project.findProperty('CORETV_STORE_PASSWORD')
+def coretvKeyAlias = project.findProperty('CORETV_KEY_ALIAS')
+def coretvKeyPassword = project.findProperty('CORETV_KEY_PASSWORD')
+
+android {
+    namespace 'com.utahmeta.coretv'
+    compileSdk {
+        version = release(36) {
+            it.minorApiLevel = 1
+        }
+    }
+    defaultConfig {
+        applicationId 'com.utahmeta.coretv'
+        minSdk 26
+        targetSdk 36
+        versionCode 56
+        versionName '1.0.1'
+    }
+    signingConfigs {
+        release {
+            if (coretvStoreFile != null) {
+                storeFile file(coretvStoreFile)
+                storePassword coretvStorePassword
+                keyAlias coretvKeyAlias
+                keyPassword coretvKeyPassword
+            }
+        }
+    }
+    buildTypes {
+        debug { minifyEnabled false }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'com.google.zxing:core:3.5.3'
+    implementation 'androidx.media3:media3-exoplayer:1.7.1'
+    implementation 'androidx.media3:media3-ui:1.7.1'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.7.1'
+}
